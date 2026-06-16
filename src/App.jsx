@@ -185,6 +185,17 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
             <Badge label={label} />
             {item.date   && <span style={{ fontSize: 11, color: C.muted }}>{item.date}</span>}
             {item.source && <span style={{ fontSize: 11, color: C.muted, fontStyle: "italic" }}>{item.source}</span>}
+            {item.link && (
+              <a
+                href={item.link}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                style={{ fontSize: 11, color: C.accentHi, textDecoration: "none" }}
+              >
+                ↗ source link
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -203,7 +214,9 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
         fontSize: 13, color: C.textDim, lineHeight: 1.6,
         borderLeft: `3px solid ${C.accent}55`, marginBottom: 12, whiteSpace: "pre-wrap",
       }}>
-        {item.draftText ?? "No draft generated — score below 6 threshold."}
+        {item.draftText
+          ? (item.link ? `${item.draftText}\n\n${item.link}` : item.draftText)
+          : "No draft generated — score below 6 threshold."}
       </div>
 
       <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5, marginBottom: 14 }}>
@@ -317,6 +330,7 @@ ${JSON.stringify(batch, null, 2)}
           id: `${i + idx}`,
           date:   batch[idx]?.date      ?? batch[idx]?.published ?? "",
           source: batch[idx]?.source    ?? batch[idx]?.domain    ?? batch[idx]?.outlet ?? "",
+          link:   batch[idx]?.link      ?? batch[idx]?.url       ?? batch[idx]?.href ?? "",
         }));
         allIdeas.push(...scored);
       } catch (err) {
@@ -344,7 +358,8 @@ ${JSON.stringify(batch, null, 2)}
   const handlePushOne = async (item) => {
     setPushStates(s => ({ ...s, [item.id]: "pushing" }));
     try {
-      await bufferCreateIdea(item.suggestedTitle, item.draftText);
+      const text = item.link ? `${item.draftText}\n\n${item.link}` : item.draftText;
+      await bufferCreateIdea(item.suggestedTitle, text);
       setPushStates(s => ({ ...s, [item.id]: "done" }));
     } catch (err) {
       setPushStates(s => ({ ...s, [item.id]: `error: ${err.message}` }));
