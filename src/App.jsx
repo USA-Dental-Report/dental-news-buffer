@@ -80,8 +80,8 @@ async function callClaude(prompt) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 2500,
       system: `You are a dental industry content strategist for USA Dental Report, a dental news media brand targeting dentists and dental professionals on LinkedIn. Evaluate news items from a CSV scrape and score them for LinkedIn content potential. Respond ONLY with a valid JSON array — no markdown, no preamble, no trailing text. All string values must use only plain ASCII characters.`,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -179,12 +179,23 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 15, color: C.text, lineHeight: 1.35, marginBottom: 6 }}>
-            {item.suggestedTitle}
+            {item.suggestedTitle ?? item.originalTitle}
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <Badge label={label} />
             {item.date   && <span style={{ fontSize: 11, color: C.muted }}>{item.date}</span>}
             {item.source && <span style={{ fontSize: 11, color: C.muted, fontStyle: "italic" }}>{item.source}</span>}
+            {item.link && (
+              <a
+                href={item.link}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                style={{ fontSize: 11, color: C.accentHi, textDecoration: "none" }}
+              >
+                ↗ source link
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -203,7 +214,9 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
         fontSize: 13, color: C.textDim, lineHeight: 1.6,
         borderLeft: `3px solid ${C.accent}55`, marginBottom: 12, whiteSpace: "pre-wrap",
       }}>
-        {item.draftText}
+        {item.draftText
+          ? (item.link ? `${item.draftText}\n\n${item.link}` : item.draftText)
+          : "No draft generated — score below 6 threshold."}
       </div>
 
       <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5, marginBottom: 14 }}>
@@ -219,16 +232,16 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
         ) : (
           <button
             onClick={() => onPush(item)}
-            disabled={isPushing}
+            disabled={isPushing || !item.draftText}
             style={{
-              background: isPushing ? C.border : C.accent,
-              color: "#fff", border: "none", borderRadius: 7,
+              background: isPushing || !item.draftText ? C.border : C.accent,
+              color: !item.draftText ? C.muted : "#fff", border: "none", borderRadius: 7,
               padding: "7px 16px", fontSize: 12, fontWeight: 700,
-              cursor: isPushing ? "default" : "pointer",
+              cursor: isPushing || !item.draftText ? "default" : "pointer",
               letterSpacing: "0.04em", transition: "background 0.15s",
             }}
           >
-            {isPushing ? "Pushing…" : "→ Add to Buffer"}
+            {isPushing ? "Pushing…" : !item.draftText ? "No draft" : "→ Add to Buffer"}
           </button>
         )}
       </div>
@@ -265,7 +278,7 @@ export default function App() {
     setIdeas([]);
     setSelected(new Set());
 
-    const BATCH = 3;
+    const BATCH = 15;
     const allIdeas = [];
 
     for (let i = 0; i < rows.length; i += BATCH) {
@@ -281,9 +294,11 @@ For EACH item, score it 1-10 on three dimensions:
 
 Also compute an overall score (average of the three, rounded to nearest integer).
 
-Write a suggested LinkedIn post draft:
+ONLY IF the overall score is 6 or higher, also write a suggested LinkedIn post draft:
 - suggestedTitle: short punchy idea title (max 80 chars)
 - draftText: 2-3 sentence LinkedIn post body for USA Dental Report's audience of dental professionals
+
+If the overall score is below 6, set suggestedTitle and draftText to null - do not write a draft for low-scoring items.
 
 Include a one-sentence rationale explaining why this content will or won't perform.
 
@@ -292,8 +307,8 @@ Respond ONLY with a valid JSON array. No markdown, no explanation, no preamble:
   {
     "id": 0,
     "originalTitle": "...",
-    "suggestedTitle": "...",
-    "draftText": "...",
+    "suggestedTitle": "..." | null,
+    "draftText": "..." | null,
     "relevanceScore": 8,
     "recencyScore": 7,
     "engagementScore": 6,
@@ -315,6 +330,7 @@ ${JSON.stringify(batch, null, 2)}
           id: `${i + idx}`,
           date:   batch[idx]?.date      ?? batch[idx]?.published ?? "",
           source: batch[idx]?.source    ?? batch[idx]?.domain    ?? batch[idx]?.outlet ?? "",
+          link:   batch[idx]?.link      ?? batch[idx]?.url       ?? batch[idx]?.href ?? "",
         }));
         allIdeas.push(...scored);
       } catch (err) {
@@ -342,7 +358,8 @@ ${JSON.stringify(batch, null, 2)}
   const handlePushOne = async (item) => {
     setPushStates(s => ({ ...s, [item.id]: "pushing" }));
     try {
-      await bufferCreateIdea(item.suggestedTitle, item.draftText);
+      const text = item.link ? `${item.draftText}\n\n${item.link}` : item.draftText;
+      await bufferCreateIdea(item.suggestedTitle, text);
       setPushStates(s => ({ ...s, [item.id]: "done" }));
     } catch (err) {
       setPushStates(s => ({ ...s, [item.id]: `error: ${err.message}` }));
