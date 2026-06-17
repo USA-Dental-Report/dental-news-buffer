@@ -319,6 +319,8 @@ ONLY IF the overall score is 6 or higher, also write a suggested LinkedIn post d
 - suggestedTitle: short punchy idea title (max 80 chars)
 - draftText: 2-3 sentence LinkedIn post body for USA Dental Report's audience of dental professionals
 
+IMPORTANT: USA Dental Report does not write or report this news itself - it curates and shares third-party news on LinkedIn. The draftText must read as commentary introducing or framing someone else's story, not as USA Dental Report's own reporting or analysis. Never use phrasing like "USA Dental Report breaks down/reports/explores/analyzes/shares its take" or any construction that credits USA Dental Report as the author of the underlying content. Instead, refer to the original source/article (e.g. "This piece looks at...", "New reporting on...", "Worth a read for dentists...") or speak directly to the topic without attributing authorship to USA Dental Report.
+
 If the overall score is below 6, set suggestedTitle and draftText to null - do not write a draft for low-scoring items.
 
 Include a one-sentence rationale explaining why this content will or won't perform.
