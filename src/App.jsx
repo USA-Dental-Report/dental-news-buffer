@@ -319,7 +319,10 @@ ONLY IF the overall score is 6 or higher, also write a suggested LinkedIn post d
 - suggestedTitle: short punchy idea title (max 80 chars)
 - draftText: 2-3 sentence LinkedIn post body for USA Dental Report's audience of dental professionals
 
-IMPORTANT: USA Dental Report does not write or report this news itself - it curates and shares third-party news on LinkedIn. The draftText must read as commentary introducing or framing someone else's story, not as USA Dental Report's own reporting or analysis. Never use phrasing like "USA Dental Report breaks down/reports/explores/analyzes/shares its take" or any construction that credits USA Dental Report as the author of the underlying content. Instead, refer to the original source/article (e.g. "This piece looks at...", "New reporting on...", "Worth a read for dentists...") or speak directly to the topic without attributing authorship to USA Dental Report.
+IMPORTANT: USA Dental Report does not write, report, test, or rank this content itself - it curates and shares third-party news and resources on LinkedIn. The draftText must read as commentary introducing or framing someone else's work, never as USA Dental Report's (or "our"/"we") own reporting, testing, ranking, or analysis.
+- Never use phrasing like "USA Dental Report breaks down/reports/explores/analyzes/shares its take".
+- Never use first-person plural claims of original work, e.g. "We ranked...", "We tested...", "Our top picks...", "We found...". Any ranking, list, or analysis described in the source belongs to whoever published it (the article's outlet, author, or company), not to USA Dental Report.
+- Attribute the original work to its source using the item's source/outlet name when available (e.g. "Deutsche Dental ranked the top 5..."), or use neutral framing like "This piece looks at...", "New ranking of...", "Worth a read for dentists..." when no clear source name is available.
 
 If the overall score is below 6, set suggestedTitle and draftText to null - do not write a draft for low-scoring items.
 
