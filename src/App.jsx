@@ -60,9 +60,11 @@ function sanitizeRow(row) {
 function extractJSON(raw) {
   let text = raw.replace(/```json|```/gi, "").trim();
   const start = text.indexOf("[");
-  const end   = text.lastIndexOf("]");
-  if (start === -1 || end === -1 || end <= start) throw new Error("No JSON array found in response");
-  text = text.slice(start, end + 1);
+  if (start === -1) throw new Error("No JSON array found in response");
+  const end = text.lastIndexOf("]");
+  // Response may be truncated (hit max_tokens) before the closing bracket —
+  // fall back to scanning from "[" to end of text rather than failing outright.
+  text = end > start ? text.slice(start, end + 1) : text.slice(start);
   try { return JSON.parse(text); } catch (_) {}
   const objects = [];
   const objRe = /\{[\s\S]*?\}(?=\s*[,\]])/g;
@@ -81,7 +83,7 @@ async function callClaude(prompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 2500,
+      max_tokens: 4096,
       system: `You are a dental industry content strategist for USA Dental Report, a dental news media brand targeting dentists and dental professionals on LinkedIn. Evaluate news items from a CSV scrape and score them for LinkedIn content potential. Respond ONLY with a valid JSON array — no markdown, no preamble, no trailing text. All string values must use only plain ASCII characters.`,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -342,22 +344,31 @@ Items:
 ${JSON.stringify(batch, null, 2)}
 `;
 
+      let result;
       try {
-        const result = await callClaude(prompt);
-        const scored = (Array.isArray(result) ? result : [result]).map((r, idx) => ({
-          ...r,
-          id: `${i + idx}`,
-          date:   batch[idx]?.date      ?? batch[idx]?.published ?? "",
-          source: batch[idx]?.source    ?? batch[idx]?.domain    ?? batch[idx]?.outlet ?? "",
-          link:   batch[idx]?.link      ?? batch[idx]?.url       ?? batch[idx]?.href ?? batch[idx]?.article_url ?? "",
-        }));
-        allIdeas.push(...scored);
+        result = await callClaude(prompt);
       } catch (err) {
-        console.warn(`Batch ${i}–${i + BATCH} failed:`, err.message);
-        setError(`Batch ${i + 1}–${Math.min(i + BATCH, rows.length)} skipped: ${err.message}`);
+        console.warn(`Batch ${i}–${i + BATCH} failed, retrying once:`, err.message);
         await new Promise(r => setTimeout(r, 1000));
-        setError("");
+        try {
+          result = await callClaude(prompt);
+        } catch (retryErr) {
+          console.warn(`Batch ${i}–${i + BATCH} failed again, skipping:`, retryErr.message);
+          setError(`Batch ${i + 1}–${Math.min(i + BATCH, rows.length)} skipped: ${retryErr.message}`);
+          await new Promise(r => setTimeout(r, 1000));
+          setError("");
+          continue;
+        }
       }
+
+      const scored = (Array.isArray(result) ? result : [result]).map((r, idx) => ({
+        ...r,
+        id: `${i + idx}`,
+        date:   batch[idx]?.date      ?? batch[idx]?.published ?? "",
+        source: batch[idx]?.source    ?? batch[idx]?.domain    ?? batch[idx]?.outlet ?? "",
+        link:   batch[idx]?.link      ?? batch[idx]?.url       ?? batch[idx]?.href ?? batch[idx]?.article_url ?? "",
+      }));
+      allIdeas.push(...scored);
     }
 
     setProgress({ done: rows.length, total: rows.length });
