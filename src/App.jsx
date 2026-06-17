@@ -349,7 +349,7 @@ ${JSON.stringify(batch, null, 2)}
           id: `${i + idx}`,
           date:   batch[idx]?.date      ?? batch[idx]?.published ?? "",
           source: batch[idx]?.source    ?? batch[idx]?.domain    ?? batch[idx]?.outlet ?? "",
-          link:   batch[idx]?.link      ?? batch[idx]?.url       ?? batch[idx]?.href ?? "",
+          link:   batch[idx]?.link      ?? batch[idx]?.url       ?? batch[idx]?.href ?? batch[idx]?.article_url ?? "",
         }));
         allIdeas.push(...scored);
       } catch (err) {
