@@ -150,10 +150,18 @@ function ScoreBar({ score }) {
 }
 
 function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
+  const [copied, setCopied] = useState(false);
   const label = scoreLabel(item.score);
   const isPushed   = pushState === "done";
   const isPushing  = pushState === "pushing";
   const isError    = typeof pushState === "string" && pushState.startsWith("error:");
+
+  const copyLink = async (e) => {
+    e.stopPropagation();
+    await navigator.clipboard.writeText(item.link);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
 
   return (
     <div
@@ -186,15 +194,26 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
             {item.date   && <span style={{ fontSize: 11, color: C.muted }}>{item.date}</span>}
             {item.source && <span style={{ fontSize: 11, color: C.muted, fontStyle: "italic" }}>{item.source}</span>}
             {item.link && (
-              <a
-                href={item.link}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={e => e.stopPropagation()}
-                style={{ fontSize: 11, color: C.accentHi, textDecoration: "none" }}
-              >
-                ↗ source link
-              </a>
+              <>
+                <a
+                  href={item.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  style={{ fontSize: 11, color: C.accentHi, textDecoration: "none" }}
+                >
+                  ↗ source link
+                </a>
+                <button
+                  onClick={copyLink}
+                  style={{
+                    background: "none", border: "none", cursor: "pointer",
+                    fontSize: 11, color: copied ? C.green : C.muted, padding: 0,
+                  }}
+                >
+                  {copied ? "✓ copied" : "⧉ copy"}
+                </button>
+              </>
             )}
           </div>
         </div>
