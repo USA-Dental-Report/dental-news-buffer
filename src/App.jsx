@@ -94,6 +94,39 @@ async function callClaude(prompt) {
   return extractJSON(raw);
 }
 
+async function generateDraftFor(item) {
+  const prompt = `
+Write a suggested LinkedIn post draft for this dental news item, for USA Dental Report's audience of dental professionals:
+- suggestedTitle: short punchy idea title (max 80 chars)
+- draftText: 2-3 sentence LinkedIn post body
+
+IMPORTANT: USA Dental Report does not write, report, test, or rank this content itself - it curates and shares third-party news and resources on LinkedIn. The draftText must read as commentary introducing or framing someone else's work, never as USA Dental Report's (or "our"/"we") own reporting, testing, ranking, or analysis.
+- Never use phrasing like "USA Dental Report breaks down/reports/explores/analyzes/shares its take".
+- Never use first-person plural claims of original work, e.g. "We ranked...", "We tested...", "Our top picks...", "We found...". Any ranking, list, or analysis described in the source belongs to whoever published it (the article's outlet, author, or company), not to USA Dental Report.
+- Attribute the original work to its source using the item's source/outlet name when available (e.g. "Deutsche Dental ranked the top 5..."), or use neutral framing like "This piece looks at...", "New ranking of...", "Worth a read for dentists..." when no clear source name is available.
+
+Respond ONLY with a valid JSON array containing one object. No markdown, no explanation, no preamble:
+[
+  {
+    "suggestedTitle": "...",
+    "draftText": "..."
+  }
+]
+
+Item:
+${JSON.stringify(sanitizeRow({
+  title: item.originalTitle,
+  date: item.date,
+  source: item.source,
+  link: item.link,
+}), null, 2)}
+`;
+  const result = await callClaude(prompt);
+  const draft = Array.isArray(result) ? result[0] : result;
+  if (!draft?.draftText) throw new Error("No draft returned");
+  return draft;
+}
+
 async function bufferCreateIdea(title, text) {
   const query = `
     mutation CreateIdea {
@@ -151,12 +184,14 @@ function ScoreBar({ score }) {
   );
 }
 
-function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
+function IdeaCard({ item, onToggle, selected, onPush, pushState, onGenerateDraft, draftGenState }) {
   const [copied, setCopied] = useState(false);
   const label = scoreLabel(item.score);
   const isPushed   = pushState === "done";
   const isPushing  = pushState === "pushing";
   const isError    = typeof pushState === "string" && pushState.startsWith("error:");
+  const isGenerating  = draftGenState === "generating";
+  const isGenError    = typeof draftGenState === "string" && draftGenState.startsWith("error:");
 
   const copyLink = async (e) => {
     e.stopPropagation();
@@ -240,6 +275,26 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState }) {
           : "No draft generated — score below 6 threshold."}
       </div>
 
+      {!item.draftText && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }} onClick={e => e.stopPropagation()}>
+          {isGenError && (
+            <span style={{ fontSize: 11, color: C.red, marginRight: 10, alignSelf: "center" }}>{draftGenState.replace("error:", "")}</span>
+          )}
+          <button
+            onClick={() => onGenerateDraft(item)}
+            disabled={isGenerating}
+            style={{
+              background: "none", color: isGenerating ? C.muted : C.accentHi,
+              border: `1px solid ${isGenerating ? C.border : C.accentHi + "66"}`,
+              borderRadius: 7, padding: "6px 14px", fontSize: 12, fontWeight: 700,
+              cursor: isGenerating ? "default" : "pointer", letterSpacing: "0.04em",
+            }}
+          >
+            {isGenerating ? "Generating…" : "✎ Generate draft anyway"}
+          </button>
+        </div>
+      )}
+
       <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5, marginBottom: 14 }}>
         <span style={{ color: C.textDim, fontWeight: 600 }}>Why this works: </span>
         {item.rationale}
@@ -276,6 +331,7 @@ export default function App() {
   const [ideas, setIdeas]         = useState([]);
   const [selected, setSelected]   = useState(new Set());
   const [pushStates, setPushStates] = useState({});
+  const [draftGenStates, setDraftGenStates] = useState({});
   const [stage, setStage]         = useState("upload"); // upload | evaluating | results
   const [error, setError]         = useState("");
   const [progress, setProgress]   = useState({ done: 0, total: 0 });
@@ -388,6 +444,19 @@ ${JSON.stringify(batch, null, 2)}
     setIdeas(allIdeas);
     setSelected(new Set(allIdeas.filter(i => i.score >= 7).map(i => i.id)));
     setStage("results");
+  };
+
+  const handleGenerateDraft = async (item) => {
+    setDraftGenStates(s => ({ ...s, [item.id]: "generating" }));
+    try {
+      const draft = await generateDraftFor(item);
+      setIdeas(prev => prev.map(i => i.id === item.id
+        ? { ...i, suggestedTitle: draft.suggestedTitle, draftText: draft.draftText }
+        : i));
+      setDraftGenStates(s => ({ ...s, [item.id]: "done" }));
+    } catch (err) {
+      setDraftGenStates(s => ({ ...s, [item.id]: `error: ${err.message}` }));
+    }
   };
 
   const handlePushOne = async (item) => {
@@ -635,6 +704,8 @@ ${JSON.stringify(batch, null, 2)}
                   onToggle={toggleItem}
                   onPush={handlePushOne}
                   pushState={pushStates[item.id]}
+                  onGenerateDraft={handleGenerateDraft}
+                  draftGenState={draftGenStates[item.id]}
                 />
               ))}
             </div>
