@@ -29,6 +29,7 @@ API keys stay server-side and never reach the browser.
    - `ANTHROPIC_API_KEY`
    - `BUFFER_ACCESS_TOKEN`
    - `BUFFER_ORG_ID`
+   - `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` — gate the whole site behind HTTP Basic Auth (enforced by `middleware.js`)
 3. Deploy to Vercel — the `api/` folder is picked up automatically as serverless functions
 
 ## Development
