@@ -44,6 +44,14 @@ function scoreLabel(score) {
   return "low";
 }
 
+function normalizeSource(source) {
+  return String(source ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "");
+}
+
 function sanitizeRow(row) {
   const clean = {};
   for (const [k, v] of Object.entries(row)) {
@@ -230,6 +238,9 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState, onGenerateDraft
             <Badge label={label} />
             {item.date   && <span style={{ fontSize: 11, color: C.muted }}>{item.date}</span>}
             {item.source && <span style={{ fontSize: 11, color: C.muted, fontStyle: "italic" }}>{item.source}</span>}
+            {item.cappedBySource && !selected && (
+              <span style={{ fontSize: 11, color: C.amber }}>· not auto-selected (source limit reached)</span>
+            )}
             {item.link && (
               <>
                 <a
@@ -356,6 +367,7 @@ export default function App() {
     setSelected(new Set());
 
     const BATCH = 15;
+    const MAX_PER_SOURCE = 2;
     const allIdeas = [];
 
     for (let i = 0; i < rows.length; i += BATCH) {
@@ -441,8 +453,22 @@ ${JSON.stringify(batch, null, 2)}
     }
 
     allIdeas.sort((a, b) => b.score - a.score);
+
+    // Cap auto-selection at MAX_PER_SOURCE per source (highest-scoring first,
+    // since allIdeas is already sorted by score) so one prolific source can't
+    // dominate the outgoing picks. Items without a recognizable source are
+    // exempt - they can't be attributed to a single dominating outlet.
+    const sourceCounts = {};
+    for (const idea of allIdeas) {
+      const key = normalizeSource(idea.source);
+      if (!key || idea.score < 7) { idea.cappedBySource = false; continue; }
+      const count = sourceCounts[key] ?? 0;
+      idea.cappedBySource = count >= MAX_PER_SOURCE;
+      if (!idea.cappedBySource) sourceCounts[key] = count + 1;
+    }
+
     setIdeas(allIdeas);
-    setSelected(new Set(allIdeas.filter(i => i.score >= 7).map(i => i.id)));
+    setSelected(new Set(allIdeas.filter(i => i.score >= 7 && !i.cappedBySource).map(i => i.id)));
     setStage("results");
   };
 
