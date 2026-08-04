@@ -17,6 +17,12 @@ const C = {
 
 const SCORE_COLORS = { high: C.green, medium: C.amber, low: C.red };
 
+// Buffer's API rejects pushes beyond 100 ideas, so a single run can never send
+// more than this — no matter how large the uploaded CSV is.
+const BUFFER_PUSH_LIMIT = 100;
+// Ceiling on how many auto-selected ideas may come from any one source domain.
+const MAX_PER_SOURCE = 2;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 function parseCSV(text) {
   const lines = text.trim().split("\n");
@@ -44,12 +50,64 @@ function scoreLabel(score) {
   return "low";
 }
 
-function normalizeSource(source) {
-  return String(source ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/^www\./, "");
+function domainFromUrl(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  if (!v) return "";
+  const m = v.match(/^(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)(?:[/?#]|$)/);
+  return m ? m[1] : "";
+}
+
+// Group key for source diversity. Prefers a real domain (from the source column
+// or, failing that, the article link) so "example.com/feed" and
+// "https://www.example.com" collapse into one bucket; falls back to the plain
+// outlet name when the source is written out in words.
+function normalizeSource(source, link) {
+  const raw = String(source ?? "").trim().toLowerCase();
+  return domainFromUrl(raw) || raw || domainFromUrl(link);
+}
+
+function sourceKey(idea) {
+  return normalizeSource(idea.source, idea.link);
+}
+
+// Pick up to `limit` ideas while spreading them across source domains. Runs in
+// passes: pass 1 takes each domain's best item, pass 2 its second-best, and so
+// on, with each pass ordered by score. A batch therefore fills breadth-first —
+// one prolific outlet can't take the top slots just because it published the
+// most. Items with no identifiable source get their own bucket each, so they're
+// never suppressed by a domain they can't be attributed to.
+function balancedSelection(ideas, { limit, minScore, maxPerSource }) {
+  const bySource = new Map();
+  for (const idea of ideas) {
+    if (idea.score < minScore || !idea.draftText) continue;
+    const key = sourceKey(idea) || `unsourced:${idea.id}`;
+    if (!bySource.has(key)) bySource.set(key, []);
+    bySource.get(key).push(idea);
+  }
+  for (const list of bySource.values()) list.sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  for (let pass = 0; pass < maxPerSource && picked.length < limit; pass++) {
+    const round = [];
+    for (const list of bySource.values()) if (list[pass]) round.push(list[pass]);
+    round.sort((a, b) => b.score - a.score);
+    for (const idea of round) {
+      if (picked.length >= limit) break;
+      picked.push(idea);
+    }
+  }
+  return picked;
+}
+
+// Auto-selection for a run. When the strict bar (8+) alone can fill the batch,
+// use it — an oversized CSV should not get in on a 7 just because it's long.
+function autoSelect(ideas, limit) {
+  const strict = balancedSelection(ideas, { limit, minScore: 8, maxPerSource: MAX_PER_SOURCE });
+  if (strict.length >= limit) return { picks: strict, threshold: 8 };
+  return {
+    picks: balancedSelection(ideas, { limit, minScore: 7, maxPerSource: MAX_PER_SOURCE }),
+    threshold: 7,
+  };
 }
 
 function sanitizeRow(row) {
@@ -238,8 +296,12 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState, onGenerateDraft
             <Badge label={label} />
             {item.date   && <span style={{ fontSize: 11, color: C.muted }}>{item.date}</span>}
             {item.source && <span style={{ fontSize: 11, color: C.muted, fontStyle: "italic" }}>{item.source}</span>}
-            {item.cappedBySource && !selected && (
-              <span style={{ fontSize: 11, color: C.amber }}>· not auto-selected (source limit reached)</span>
+            {item.skipReason && !selected && (
+              <span style={{ fontSize: 11, color: C.amber }}>
+                {item.skipReason === "source"
+                  ? "· not auto-selected (source limit reached)"
+                  : `· not auto-selected (batch full at ${BUFFER_PUSH_LIMIT})`}
+              </span>
             )}
             {item.link && (
               <>
@@ -345,6 +407,8 @@ export default function App() {
   const [draftGenStates, setDraftGenStates] = useState({});
   const [stage, setStage]         = useState("upload"); // upload | evaluating | results
   const [error, setError]         = useState("");
+  const [autoSelectInfo, setAutoSelectInfo] = useState(null);
+  const [capNotice, setCapNotice] = useState("");
   const [progress, setProgress]   = useState({ done: 0, total: 0 });
   const fileRef = useRef();
 
@@ -365,10 +429,23 @@ export default function App() {
     setError("");
     setIdeas([]);
     setSelected(new Set());
+    setAutoSelectInfo(null);
+    setCapNotice("");
 
     const BATCH = 15;
-    const MAX_PER_SOURCE = 2;
     const allIdeas = [];
+    // An oversized CSV can't all be published, so grade it on a tighter curve.
+    // Batches are scored independently, so the bar has to be stated in absolute
+    // terms rather than "the best of these 15".
+    const strictScoring = rows.length > BUFFER_PUSH_LIMIT;
+    const strictBlock = strictScoring ? `
+SCORING BAR — BE STRICT. This scrape has ${rows.length} items but only ${BUFFER_PUSH_LIMIT} can be published, so most of these items must not make the cut. Score each item on its own absolute merit, not relative to the other items in this batch:
+- 9-10: major industry-moving news a dentist would talk about with colleagues.
+- 7-8: genuinely useful or notable to practicing dentists — clinical findings, regulatory or payer changes, real business/market news.
+- 4-6: mildly interesting, thin, or narrow — routine product blurbs, single-practice announcements, generic listicles, marketing content.
+- 1-3: off-topic, promotional filler, syndicated rewrites, or consumer-oriented fluff.
+Expect only about one item in three to deserve a 7 or higher. Do not inflate scores to be helpful.
+` : "";
 
     for (let i = 0; i < rows.length; i += BATCH) {
       const batch = rows.slice(i, i + BATCH).map(sanitizeRow);
@@ -382,7 +459,7 @@ For EACH item, score it 1-10 on three dimensions:
 - engagementScore (LinkedIn engagement potential based on headline quality and topic)
 
 Also compute an overall score (average of the three, rounded to nearest integer).
-
+${strictBlock}
 ONLY IF the overall score is 6 or higher, also write a suggested LinkedIn post draft:
 - suggestedTitle: short punchy idea title (max 80 chars)
 - draftText: 2-3 sentence LinkedIn post body for USA Dental Report's audience of dental professionals
@@ -454,21 +531,29 @@ ${JSON.stringify(batch, null, 2)}
 
     allIdeas.sort((a, b) => b.score - a.score);
 
-    // Cap auto-selection at MAX_PER_SOURCE per source (highest-scoring first,
-    // since allIdeas is already sorted by score) so one prolific source can't
-    // dominate the outgoing picks. Items without a recognizable source are
-    // exempt - they can't be attributed to a single dominating outlet.
-    const sourceCounts = {};
-    for (const idea of allIdeas) {
-      const key = normalizeSource(idea.source);
-      if (!key || idea.score < 7) { idea.cappedBySource = false; continue; }
-      const count = sourceCounts[key] ?? 0;
-      idea.cappedBySource = count >= MAX_PER_SOURCE;
-      if (!idea.cappedBySource) sourceCounts[key] = count + 1;
+    const { picks, threshold } = autoSelect(allIdeas, BUFFER_PUSH_LIMIT);
+    const pickedIds = new Set(picks.map(i => i.id));
+    const pickedPerSource = {};
+    for (const idea of picks) {
+      const key = sourceKey(idea);
+      if (key) pickedPerSource[key] = (pickedPerSource[key] ?? 0) + 1;
     }
 
+    // Explain, per item, why a qualifying idea didn't make the auto-selection:
+    // its domain was already at the per-source cap, or the batch hit Buffer's
+    // 100-idea ceiling.
+    for (const idea of allIdeas) {
+      if (pickedIds.has(idea.id) || idea.score < threshold || !idea.draftText) {
+        idea.skipReason = null;
+        continue;
+      }
+      const key = sourceKey(idea);
+      idea.skipReason = key && (pickedPerSource[key] ?? 0) >= MAX_PER_SOURCE ? "source" : "cap";
+    }
+
+    setAutoSelectInfo({ threshold, strictScoring, picked: picks.length });
     setIdeas(allIdeas);
-    setSelected(new Set(allIdeas.filter(i => i.score >= 7 && !i.cappedBySource).map(i => i.id)));
+    setSelected(pickedIds);
     setStage("results");
   };
 
@@ -496,12 +581,22 @@ ${JSON.stringify(batch, null, 2)}
     }
   };
 
+  const pushedCount = ideas.filter(i => pushStates[i.id] === "done").length;
+  const pushableSelected = ideas.filter(i => selected.has(i.id) && pushStates[i.id] !== "done");
+  // Ideas already pushed count against Buffer's ceiling for this run.
+  const remainingCapacity = Math.max(0, BUFFER_PUSH_LIMIT - pushedCount - pushableSelected.length);
+
   const handlePushSelected = async () => {
-    const toPush = ideas.filter(i => selected.has(i.id) && pushStates[i.id] !== "done");
+    const toPush = pushableSelected.slice(0, Math.max(0, BUFFER_PUSH_LIMIT - pushedCount));
     for (const item of toPush) await handlePushOne(item);
   };
 
   const toggleItem = (id) => {
+    if (!selected.has(id) && remainingCapacity === 0) {
+      setCapNotice(`Buffer accepts at most ${BUFFER_PUSH_LIMIT} ideas per push — deselect one to swap this in.`);
+      return;
+    }
+    setCapNotice("");
     setSelected(prev => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
@@ -509,7 +604,22 @@ ${JSON.stringify(batch, null, 2)}
     });
   };
 
-  const pushableSelected = ideas.filter(i => selected.has(i.id) && pushStates[i.id] !== "done");
+  // Fills up to the cap in the same source-balanced order as auto-selection, so
+  // "select all" on a 300-row CSV still yields a spread-out batch of 100.
+  const selectMax = () => {
+    const room = Math.max(0, BUFFER_PUSH_LIMIT - pushedCount);
+    const balanced = balancedSelection(ideas, {
+      limit: room,
+      minScore: 1,
+      maxPerSource: Math.max(MAX_PER_SOURCE, room),
+    });
+    setCapNotice(
+      balanced.length < ideas.filter(i => i.draftText).length
+        ? `Selected the top ${balanced.length} of ${ideas.length} — Buffer caps each push at ${BUFFER_PUSH_LIMIT}.`
+        : ""
+    );
+    setSelected(new Set(balanced.map(i => i.id)));
+  };
 
   const STAGES = ["upload", "evaluating", "results"];
   const stageIdx = STAGES.indexOf(stage);
@@ -669,20 +779,26 @@ ${JSON.stringify(batch, null, 2)}
             }}>
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 <span style={{ fontSize: 13, color: C.muted }}>
-                  {ideas.length} evaluated · <span style={{ color: C.text }}>{selected.size} selected</span>
+                  {ideas.length} evaluated ·{" "}
+                  <span style={{ color: remainingCapacity === 0 ? C.amber : C.text }}>
+                    {pushableSelected.length + pushedCount} / {BUFFER_PUSH_LIMIT} selected
+                  </span>
                 </span>
-                <button onClick={() => setSelected(new Set(ideas.map(i => i.id)))}
+                <button onClick={selectMax}
                   style={{ background: "none", border: "none", color: C.accentHi, fontSize: 12, cursor: "pointer" }}>
-                  Select all
+                  Select max
                 </button>
-                <button onClick={() => setSelected(new Set())}
+                <button onClick={() => { setSelected(new Set()); setCapNotice(""); }}
                   style={{ background: "none", border: "none", color: C.muted, fontSize: 12, cursor: "pointer" }}>
                   Clear
                 </button>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button
-                  onClick={() => { setIdeas([]); setRows([]); setStage("upload"); }}
+                  onClick={() => {
+                    setIdeas([]); setRows([]); setStage("upload");
+                    setAutoSelectInfo(null); setCapNotice("");
+                  }}
                   style={{
                     background: C.surface, color: C.textDim, border: `1px solid ${C.border}`,
                     borderRadius: 8, padding: "8px 14px", fontSize: 12, cursor: "pointer",
@@ -703,6 +819,21 @@ ${JSON.stringify(batch, null, 2)}
                 </button>
               </div>
             </div>
+
+            {(capNotice || autoSelectInfo) && (
+              <div style={{
+                background: C.surface, border: `1px solid ${capNotice ? C.amber + "44" : C.border}`,
+                borderRadius: 10, padding: "12px 16px", marginBottom: 20,
+                fontSize: 12, color: capNotice ? C.amber : C.muted, lineHeight: 1.6,
+              }}>
+                {capNotice || (
+                  <>
+                    Auto-selected {autoSelectInfo.picked} of {ideas.length} · max {MAX_PER_SOURCE} per source domain · score {autoSelectInfo.threshold}+
+                    {autoSelectInfo.strictScoring && ` · strict scoring (CSV over ${BUFFER_PUSH_LIMIT} items)`}
+                  </>
+                )}
+              </div>
+            )}
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 24 }}>
               {[
