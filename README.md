@@ -14,6 +14,15 @@ An internal tool for **USA Dental Report** that streamlines the workflow from ra
 
 3. **Push** — review the scored ideas, select the ones you want (high-scoring items are auto-selected), and push them directly to **Buffer** as LinkedIn Ideas via Buffer's GraphQL API.
 
+## Batch selection
+
+Buffer accepts at most **100 ideas per push**, so a large scrape has to be narrowed down:
+
+- **Stricter scoring on oversized CSVs** — when the upload has more than 100 rows, Claude grades on an explicit absolute curve (9–10 for industry-moving news, 4–6 for routine product blurbs and single-practice announcements) instead of its default bar.
+- **Source-balanced picks** — auto-selection fills the batch breadth-first across source domains: every domain contributes its best item before any domain contributes a second, capped at 2 per domain. A prolific outlet can't take the top slots just because it published the most. Domains are normalized from the source column, falling back to the article link's hostname.
+- **Adaptive threshold** — if items scoring 8+ can fill all 100 slots on their own, the 7s don't make the cut.
+- **Hard 100 cap** — the selection UI won't let you go past 100 (already-pushed ideas count toward it), and the push itself is clamped to the same ceiling.
+
 ## Architecture
 
 - **Frontend** — dark-themed single-page React app (Vite), hosted on Vercel
