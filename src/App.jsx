@@ -1,4 +1,6 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
+
+const DEFAULT_MAX_PER_SOURCE = 2;
 
 const C = {
   bg:       "#0a0c10",
@@ -44,12 +46,81 @@ function scoreLabel(score) {
   return "low";
 }
 
+// Sub-domains that don't identify a distinct publisher - stripped so
+// blog.acme.com, news.acme.com and www.acme.com land in one bucket.
+const SUBDOMAIN_NOISE = /^(www\d?|m|amp|blog|blogs|news|newsroom|feed|feeds|rss|en|us|web|media|content|insights|resources)\./;
+
+function stripNoisySubdomains(host) {
+  let h = host;
+  // Only strip while a real domain is left behind, so news.com stays news.com.
+  while (SUBDOMAIN_NOISE.test(h) && h.replace(SUBDOMAIN_NOISE, "").includes(".")) {
+    h = h.replace(SUBDOMAIN_NOISE, "");
+  }
+  return h;
+}
+
+function domainFromUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const withProto = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  let host;
+  try { host = new URL(withProto).hostname; } catch (_) { return ""; }
+  return stripNoisySubdomains(host.toLowerCase().replace(/^\.+|\.+$/g, ""));
+}
+
 function normalizeSource(source) {
   return String(source ?? "")
     .trim()
     .toLowerCase()
     .replace(/^https?:\/\//, "")
-    .replace(/^www\./, "");
+    .replace(/^www\./, "")
+    .split(/[/?#]/)[0]   // drop any path/query - otherwise every article URL is its own "source"
+    .trim();
+}
+
+// One stable key per publisher. The article URL is the most reliable signal:
+// a CSV "source" column may be a display name, a bare domain, a full article
+// URL, or missing entirely - so prefer the link's hostname and fall back to
+// whatever the source column says.
+function sourceKey(item) {
+  return domainFromUrl(item?.link) || domainFromUrl(item?.source) || normalizeSource(item?.source);
+}
+
+// Ranks each idea within its own source (list must already be sorted
+// best-first) and flags everything past `maxPerSource`. Items with no
+// recognizable source stay uncapped - they can't be pinned on one outlet.
+function applySourceCap(list, maxPerSource) {
+  const counts = {};
+  return list.map(idea => {
+    const key = idea.sourceKey || sourceKey(idea);
+    if (!key) return { ...idea, sourceKey: "", sourceRank: 0, cappedBySource: false };
+    const rank = (counts[key] ?? 0) + 1;
+    counts[key] = rank;
+    return {
+      ...idea,
+      sourceKey: key,
+      sourceRank: rank,
+      cappedBySource: maxPerSource > 0 && rank > maxPerSource,
+    };
+  });
+}
+
+function autoSelectedIds(list) {
+  return new Set(list.filter(i => i.score >= 7 && !i.cappedBySource).map(i => i.id));
+}
+
+// [domain, total, overLimit] per source, heaviest first.
+function sourceTally(list) {
+  const counts = {};
+  for (const i of list) {
+    if (!i.sourceKey) continue;
+    const row = counts[i.sourceKey] ?? (counts[i.sourceKey] = { total: 0, over: 0 });
+    row.total += 1;
+    if (i.cappedBySource) row.over += 1;
+  }
+  return Object.entries(counts)
+    .map(([domain, v]) => [domain, v.total, v.over])
+    .sort((a, b) => b[1] - a[1]);
 }
 
 function sanitizeRow(row) {
@@ -238,8 +309,10 @@ function IdeaCard({ item, onToggle, selected, onPush, pushState, onGenerateDraft
             <Badge label={label} />
             {item.date   && <span style={{ fontSize: 11, color: C.muted }}>{item.date}</span>}
             {item.source && <span style={{ fontSize: 11, color: C.muted, fontStyle: "italic" }}>{item.source}</span>}
-            {item.cappedBySource && !selected && (
-              <span style={{ fontSize: 11, color: C.amber }}>· not auto-selected (source limit reached)</span>
+            {item.cappedBySource && (
+              <span style={{ fontSize: 11, color: C.amber }}>
+                · #{item.sourceRank} from this source — over the per-source limit
+              </span>
             )}
             {item.link && (
               <>
@@ -346,7 +419,32 @@ export default function App() {
   const [stage, setStage]         = useState("upload"); // upload | evaluating | results
   const [error, setError]         = useState("");
   const [progress, setProgress]   = useState({ done: 0, total: 0 });
+  const [maxPerSource, setMaxPerSource] = useState(DEFAULT_MAX_PER_SOURCE);
+  const [hideCapped, setHideCapped]     = useState(false);
   const fileRef = useRef();
+
+  // `ideas` holds the raw score-sorted list; the per-source cap is re-derived
+  // on every render so changing the limit re-ranks without re-calling Claude.
+  const rankedIdeas  = useMemo(() => applySourceCap(ideas, maxPerSource), [ideas, maxPerSource]);
+  const visibleIdeas = hideCapped ? rankedIdeas.filter(i => !i.cappedBySource) : rankedIdeas;
+  const cappedCount  = rankedIdeas.filter(i => i.cappedBySource).length;
+  const tally        = useMemo(() => sourceTally(rankedIdeas), [rankedIdeas]);
+
+  const toggleHideCapped = (next) => {
+    setHideCapped(next);
+    if (next) {
+      const cappedIds = new Set(rankedIdeas.filter(i => i.cappedBySource).map(i => i.id));
+      setSelected(prev => new Set([...prev].filter(id => !cappedIds.has(id))));
+    }
+  };
+
+  const changeMaxPerSource = (next) => {
+    const clamped = Math.max(1, Math.min(10, next));
+    if (clamped === maxPerSource) return;
+    setMaxPerSource(clamped);
+    // Re-run auto-selection against the new limit (this drops manual picks).
+    setSelected(autoSelectedIds(applySourceCap(ideas, clamped)));
+  };
 
   const handleFileLoad = (e) => {
     const file = e.target.files[0];
@@ -367,7 +465,6 @@ export default function App() {
     setSelected(new Set());
 
     const BATCH = 15;
-    const MAX_PER_SOURCE = 2;
     const allIdeas = [];
 
     for (let i = 0; i < rows.length; i += BATCH) {
@@ -434,13 +531,18 @@ ${JSON.stringify(batch, null, 2)}
         }
       }
 
-      const scored = (Array.isArray(result) ? result : [result]).map((r, idx) => ({
-        ...r,
-        id: `${i + idx}`,
-        date:   batch[idx]?.date      ?? batch[idx]?.published ?? "",
-        source: batch[idx]?.source    ?? batch[idx]?.domain    ?? batch[idx]?.outlet ?? "",
-        link:   batch[idx]?.link      ?? batch[idx]?.url       ?? batch[idx]?.href ?? batch[idx]?.article_url ?? "",
-      }));
+      const scored = (Array.isArray(result) ? result : [result]).map((r, idx) => {
+        const row = batch[idx] ?? {};
+        const item = {
+          ...r,
+          id: `${i + idx}`,
+          order: i + idx,
+          date:   row.date   ?? row.published ?? "",
+          source: row.source ?? row.domain    ?? row.outlet ?? "",
+          link:   row.link   ?? row.url       ?? row.href    ?? row.article_url ?? "",
+        };
+        return { ...item, sourceKey: sourceKey(item) };
+      });
       allIdeas.push(...scored);
     }
 
@@ -452,23 +554,11 @@ ${JSON.stringify(batch, null, 2)}
       return;
     }
 
-    allIdeas.sort((a, b) => b.score - a.score);
-
-    // Cap auto-selection at MAX_PER_SOURCE per source (highest-scoring first,
-    // since allIdeas is already sorted by score) so one prolific source can't
-    // dominate the outgoing picks. Items without a recognizable source are
-    // exempt - they can't be attributed to a single dominating outlet.
-    const sourceCounts = {};
-    for (const idea of allIdeas) {
-      const key = normalizeSource(idea.source);
-      if (!key || idea.score < 7) { idea.cappedBySource = false; continue; }
-      const count = sourceCounts[key] ?? 0;
-      idea.cappedBySource = count >= MAX_PER_SOURCE;
-      if (!idea.cappedBySource) sourceCounts[key] = count + 1;
-    }
+    // Best-first, ties broken by original CSV order so ranking is stable.
+    allIdeas.sort((a, b) => (b.score - a.score) || (a.order - b.order));
 
     setIdeas(allIdeas);
-    setSelected(new Set(allIdeas.filter(i => i.score >= 7 && !i.cappedBySource).map(i => i.id)));
+    setSelected(autoSelectedIds(applySourceCap(allIdeas, maxPerSource)));
     setStage("results");
   };
 
@@ -671,9 +761,9 @@ ${JSON.stringify(batch, null, 2)}
                 <span style={{ fontSize: 13, color: C.muted }}>
                   {ideas.length} evaluated · <span style={{ color: C.text }}>{selected.size} selected</span>
                 </span>
-                <button onClick={() => setSelected(new Set(ideas.map(i => i.id)))}
+                <button onClick={() => setSelected(new Set(visibleIdeas.map(i => i.id)))}
                   style={{ background: "none", border: "none", color: C.accentHi, fontSize: 12, cursor: "pointer" }}>
-                  Select all
+                  Select all{hideCapped ? " shown" : ""}
                 </button>
                 <button onClick={() => setSelected(new Set())}
                   style={{ background: "none", border: "none", color: C.muted, fontSize: 12, cursor: "pointer" }}>
@@ -704,6 +794,71 @@ ${JSON.stringify(batch, null, 2)}
               </div>
             </div>
 
+            <div style={{
+              background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+              padding: "14px 16px", marginBottom: 16,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, color: C.textDim, fontWeight: 600 }}>Max posts per source</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                  {[["−", maxPerSource - 1], ["+", maxPerSource + 1]].map(([sym, next], idx) => (
+                    <button
+                      key={sym}
+                      onClick={() => changeMaxPerSource(next)}
+                      disabled={next < 1 || next > 10}
+                      style={{
+                        background: C.surface, color: next < 1 || next > 10 ? C.border : C.text,
+                        border: `1px solid ${C.border}`,
+                        borderRadius: idx === 0 ? "7px 0 0 7px" : "0 7px 7px 0",
+                        width: 30, height: 30, fontSize: 15, fontWeight: 700,
+                        cursor: next < 1 || next > 10 ? "default" : "pointer",
+                      }}
+                    >{sym}</button>
+                  ))}
+                  <span style={{
+                    fontSize: 15, fontWeight: 800, color: C.accentHi,
+                    minWidth: 28, textAlign: "center",
+                  }}>{maxPerSource}</span>
+                </div>
+                <span style={{ fontSize: 11, color: C.muted }}>
+                  {cappedCount > 0
+                    ? `${cappedCount} item${cappedCount === 1 ? "" : "s"} over the limit, de-selected`
+                    : "no source is over the limit"}
+                </span>
+                {cappedCount > 0 && (
+                  <label style={{ fontSize: 11, color: C.textDim, display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={hideCapped}
+                      onChange={e => toggleHideCapped(e.target.checked)}
+                      style={{ accentColor: C.accent, cursor: "pointer" }}
+                    />
+                    Hide them
+                  </label>
+                )}
+              </div>
+
+              {tally.length > 0 && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+                  {tally.slice(0, 6).map(([domain, total, over]) => (
+                    <span key={domain} style={{
+                      fontSize: 11, padding: "3px 9px", borderRadius: 999,
+                      background: over > 0 ? C.amber + "18" : C.surface,
+                      border: `1px solid ${over > 0 ? C.amber + "44" : C.border}`,
+                      color: over > 0 ? C.amber : C.muted,
+                    }}>
+                      {domain} · {total}{over > 0 ? ` (${over} over)` : ""}
+                    </span>
+                  ))}
+                  {tally.length > 6 && (
+                    <span style={{ fontSize: 11, color: C.muted, alignSelf: "center" }}>
+                      +{tally.length - 6} more sources
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 24 }}>
               {[
                 ["High (7–10)", ideas.filter(i => i.score >= 7).length, C.green],
@@ -722,7 +877,7 @@ ${JSON.stringify(batch, null, 2)}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {ideas.map(item => (
+              {visibleIdeas.map(item => (
                 <IdeaCard
                   key={item.id}
                   item={item}
